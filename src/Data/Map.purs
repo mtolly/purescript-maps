@@ -36,6 +36,9 @@ module Data.Map
   , filterWithKey
   , filterKeys
   , filter
+  , zoomAscDo
+  , zoomDescDo
+  , doTupleArray
   ) where
 
 import Prelude
@@ -50,6 +53,8 @@ import Data.Traversable (traverse, class Traversable)
 import Data.Tuple (Tuple(Tuple), snd, uncurry)
 import Data.Unfoldable (class Unfoldable, unfoldr)
 import Partial.Unsafe (unsafePartial)
+import Control.Monad.Eff (Eff, runPure)
+import Data.Array.ST (runSTArray, emptySTArray, pushSTArray)
 
 -- | `Map k v` represents maps from keys of type `k` to values of type `v`.
 data Map k v
@@ -498,3 +503,43 @@ filterKeys predicate = filterWithKey $ const <<< predicate
 -- | on the value fails to hold.
 filter :: forall k v. Ord k => (v -> Boolean) -> Map k v -> Map k v
 filter predicate = filterWithKey $ const predicate
+
+-- | Executes an action for key-value pairs with the key within certain bounds,
+-- in ascending key order
+zoomAscDo :: forall k v m. (Ord k) => (Monad m) => k -> k -> Map k v -> (k -> v -> m Unit) -> m Unit
+zoomAscDo kmin kmax m act = case m of
+  Leaf -> pure unit
+  Two left k v right -> do
+    when (kmin < k) $ zoomAscDo kmin kmax left act
+    when (kmin < k && k < kmax) $ act k v
+    when (k < kmax) $ zoomAscDo kmin kmax right act
+  Three left k1 v1 mid k2 v2 right -> do
+    when (kmin < k1) $ zoomAscDo kmin kmax left act
+    when (kmin < k1 && k1 < kmax) $ act k1 v1
+    when (kmin < k2 && k1 < kmax) $ zoomAscDo kmin kmax mid act
+    when (kmin < k2 && k2 < kmax) $ act k2 v2
+    when (k2 < kmax) $ zoomAscDo kmin kmax right act
+
+-- | Executes an action for key-value pairs with the key within certain bounds,
+-- in descending key order
+zoomDescDo :: forall k v m. (Ord k) => (Monad m) => k -> k -> Map k v -> (k -> v -> m Unit) -> m Unit
+zoomDescDo kmin kmax m act = case m of
+  Leaf -> pure unit
+  Two left k v right -> do
+    when (k < kmax) $ zoomDescDo kmin kmax right act
+    when (kmin < k && k < kmax) $ act k v
+    when (kmin < k) $ zoomDescDo kmin kmax left act
+  Three left k1 v1 mid k2 v2 right -> do
+    when (k2 < kmax) $ zoomDescDo kmin kmax right act
+    when (kmin < k2 && k2 < kmax) $ act k2 v2
+    when (kmin < k2 && k1 < kmax) $ zoomDescDo kmin kmax mid act
+    when (kmin < k1 && k1 < kmax) $ act k1 v1
+    when (kmin < k1) $ zoomDescDo kmin kmax left act
+
+-- | Converts `zoomAscDo` or `zoomDescDo` into an array-generating function
+doTupleArray :: forall k v. (forall e. (k -> v -> Eff e Unit) -> Eff e Unit) -> Array (Tuple k v)
+doTupleArray f = runPure $ runSTArray (do
+  arr <- emptySTArray
+  f $ \k v -> void $ pushSTArray arr $ Tuple k v
+  pure arr
+)
